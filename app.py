@@ -1,8 +1,10 @@
+import base64
 import io
 import os
 import tempfile
 import fitz  # PyMuPDF
 import pytesseract
+import requests
 import streamlit as st
 from PIL import Image
 from markitdown import MarkItDown
@@ -28,70 +30,92 @@ with st.expander("💡 Why convert files to Markdown (.md) for AI?"):
         """
     )
 
-# Collapsible sidebar for AI Vision integration (Gemini or OpenAI)
-with st.sidebar:
-    st.header("⚙️ AI Vision Options")
-    provider = st.selectbox(
-        "AI Provider (Optional)",
-        ["Google Gemini (Free Tier)", "OpenAI"]
-    )
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_gemini_models(key: str):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key.strip()}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            try:
+                err_msg = resp.json().get("error", {}).get("message", resp.text)
+            except Exception:
+                err_msg = resp.text
+            return [], f"HTTP {resp.status_code}: {err_msg}"
 
-    if "Gemini" in provider:
-        model_choice = st.selectbox(
-            "Model Name",
-            ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "Custom..."]
-        )
-    else:
-        model_choice = st.selectbox(
-            "Model Name",
-            ["gpt-4o-mini", "gpt-4o", "Custom..."]
-        )
+        data = resp.json()
+        models = []
+        for m in data.get("models", []):
+            methods = m.get("supportedGenerationMethods", [])
+            name = m.get("name", "").replace("models/", "")
+            if "generateContent" in methods and "gemini" in name.lower():
+                if not any(skip in name.lower() for skip in ["embedding", "aqa", "tts", "robotics", "image-generation"]):
+                    models.append(name)
 
-    if model_choice == "Custom...":
-        selected_model = st.text_input("Enter exact model ID", value="gemini-2.0-flash")
-    else:
-        selected_model = model_choice
+        models.sort(key=lambda x: (0 if "flash" in x else 1, x))
+        return models, None
+    except Exception as e:
+        return [], str(e)
 
-    api_key = st.text_input(
-        f"{provider.split(' ')[0]} API Key",
-        type="password",
-        help="Paste your key to use AI Vision for describing diagrams, equations, and complex images. Leave empty to use free offline OCR."
-    )
-    st.info("🔒 Your API key and files stay in temporary session memory and are never stored.")
+def convert_image_with_gemini(image_path: str, key: str, model_name: str) -> str:
+    with open(image_path, "rb") as f:
+        b64_data = base64.b64encode(f.read()).decode("utf-8")
+
+    ext = os.path.splitext(image_path)[1].lower()
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+    mime_type = mime_map.get(ext, "image/jpeg")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key.strip()}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": (
+                            "Extract all text, tables, equations, and diagrams from this image and format the output as clean, structured Markdown. "
+                            "Preserve the original language (Arabic or English), headings, lists, and tables accurately. "
+                            "If the image contains a diagram, plot, or circuit schematic, describe its structure and labels clearly in Markdown."
+                        )
+                    },
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": b64_data
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    resp = requests.post(url, json=payload, timeout=30)
+    if resp.status_code != 200:
+        try:
+            err_detail = resp.json().get("error", {}).get("message", resp.text)
+        except Exception:
+            err_detail = resp.text
+        raise RuntimeError(f"HTTP {resp.status_code}: {err_detail}")
+
+    data = resp.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned an empty response.")
+    parts = candidates[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts).strip()
+
+def convert_image_with_openai(image_path: str, key: str, model_name: str) -> str:
+    client = OpenAI(api_key=key.strip(), timeout=30.0, max_retries=1)
+    md_vision = MarkItDown(llm_client=client, llm_model=model_name.strip())
+    result = md_vision.convert(image_path)
+    return getattr(result, "markdown", None) or result.text_content or ""
 
 @st.cache_resource
 def get_basic_converter():
     return MarkItDown()
-
-def build_vision_converter(selected_provider: str, key: str, model_name: str):
-    if "Gemini" in selected_provider:
-        client = OpenAI(
-            api_key=key.strip(),
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-    else:
-        client = OpenAI(api_key=key.strip())
-    return MarkItDown(llm_client=client, llm_model=model_name.strip())
-
-def convert_image_with_vision(image_path: str, selected_provider: str, key: str, chosen_model: str) -> str:
-    models_to_try = [chosen_model.strip()]
-    if "Gemini" in selected_provider:
-        for fallback in ["gemini-2.0-flash", "gemini-2.5-flash"]:
-            if fallback not in models_to_try:
-                models_to_try.append(fallback)
-
-    last_err = None
-    for m in models_to_try:
-        try:
-            md_vision = build_vision_converter(selected_provider, key, m)
-            result = md_vision.convert(image_path)
-            return getattr(result, "markdown", None) or result.text_content or ""
-        except Exception as e:
-            last_err = e
-            if "404" in str(e) or "NotFound" in str(e):
-                continue
-            raise e
-    raise last_err
 
 def ocr_image(image: Image.Image) -> str:
     return pytesseract.image_to_string(image, lang="ara+eng").strip()
@@ -115,6 +139,37 @@ def ocr_scanned_pdf(pdf_path: str) -> str:
         progress_bar.empty()
 
     return "\n\n---\n\n".join(extracted_pages)
+
+# Collapsible sidebar for AI Vision integration
+with st.sidebar:
+    st.header("⚙️ AI Vision Options")
+    provider = st.selectbox(
+        "AI Provider (Optional)",
+        ["Google Gemini (Free Tier)", "OpenAI"]
+    )
+    api_key = st.text_input(
+        f"{provider.split(' ')[0]} API Key",
+        type="password",
+        help="Paste your API key to use AI Vision for diagrams, equations, and complex images. Leave empty for free offline OCR."
+    )
+
+    selected_model = None
+    if "Gemini" in provider:
+        if api_key and api_key.strip():
+            available_models, fetch_err = fetch_gemini_models(api_key)
+            if fetch_err:
+                st.error(f"Key check failed: {fetch_err}")
+            elif available_models:
+                st.success(f"✅ Connected! {len(available_models)} models available.")
+                selected_model = st.selectbox("Available Gemini Models", available_models)
+            else:
+                st.warning("Connected, but no text/vision models were listed.")
+        else:
+            st.caption("Paste your AIza... key above to load your available Gemini models automatically.")
+    else:
+        selected_model = st.selectbox("OpenAI Model", ["gpt-4o-mini", "gpt-4o"])
+
+    st.info("🔒 Your API key and files stay in temporary session memory and are never stored.")
 
 if "markdown_output" not in st.session_state:
     st.session_state.markdown_output = None
@@ -148,12 +203,15 @@ with tab_file:
                     # Case 1: Image files
                     if suffix in [".png", ".jpg", ".jpeg", ".webp"]:
                         text = ""
-                        if api_key and api_key.strip():
+                        if api_key and api_key.strip() and selected_model:
                             try:
-                                text = convert_image_with_vision(tmp_path, provider, api_key, selected_model)
+                                if "Gemini" in provider:
+                                    text = convert_image_with_gemini(tmp_path, api_key, selected_model)
+                                else:
+                                    text = convert_image_with_openai(tmp_path, api_key, selected_model)
                             except Exception as vision_err:
                                 st.session_state.warning_msg = (
-                                    f"⚠️ AI Vision returned an error ({vision_err}), so offline OCR was used automatically instead."
+                                    f"⚠️ AI Vision error ({vision_err}). Switched to free offline OCR automatically."
                                 )
                                 with Image.open(tmp_path) as img:
                                     text = ocr_image(img)
