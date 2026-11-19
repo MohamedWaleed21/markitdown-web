@@ -35,6 +35,23 @@ with st.sidebar:
         "AI Provider (Optional)",
         ["Google Gemini (Free Tier)", "OpenAI"]
     )
+
+    if "Gemini" in provider:
+        model_choice = st.selectbox(
+            "Model Name",
+            ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "Custom..."]
+        )
+    else:
+        model_choice = st.selectbox(
+            "Model Name",
+            ["gpt-4o-mini", "gpt-4o", "Custom..."]
+        )
+
+    if model_choice == "Custom...":
+        selected_model = st.text_input("Enter exact model ID", value="gemini-2.0-flash")
+    else:
+        selected_model = model_choice
+
     api_key = st.text_input(
         f"{provider.split(' ')[0]} API Key",
         type="password",
@@ -46,18 +63,35 @@ with st.sidebar:
 def get_basic_converter():
     return MarkItDown()
 
-def get_converter(selected_provider: str, key: str):
-    if key and key.strip():
-        if "Gemini" in selected_provider:
-            client = OpenAI(
-                api_key=key.strip(),
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-            )
-            return MarkItDown(llm_client=client, llm_model="gemini-2.5-flash")
-        else:
-            client = OpenAI(api_key=key.strip())
-            return MarkItDown(llm_client=client, llm_model="gpt-4o-mini")
-    return get_basic_converter()
+def build_vision_converter(selected_provider: str, key: str, model_name: str):
+    if "Gemini" in selected_provider:
+        client = OpenAI(
+            api_key=key.strip(),
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+    else:
+        client = OpenAI(api_key=key.strip())
+    return MarkItDown(llm_client=client, llm_model=model_name.strip())
+
+def convert_image_with_vision(image_path: str, selected_provider: str, key: str, chosen_model: str) -> str:
+    models_to_try = [chosen_model.strip()]
+    if "Gemini" in selected_provider:
+        for fallback in ["gemini-2.0-flash", "gemini-2.5-flash"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
+    last_err = None
+    for m in models_to_try:
+        try:
+            md_vision = build_vision_converter(selected_provider, key, m)
+            result = md_vision.convert(image_path)
+            return getattr(result, "markdown", None) or result.text_content or ""
+        except Exception as e:
+            last_err = e
+            if "404" in str(e) or "NotFound" in str(e):
+                continue
+            raise e
+    raise last_err
 
 def ocr_image(image: Image.Image) -> str:
     return pytesseract.image_to_string(image, lang="ara+eng").strip()
@@ -103,7 +137,7 @@ with tab_file:
             suffix = os.path.splitext(uploaded_file.name)[1].lower()
             base_name = os.path.splitext(uploaded_file.name)[0]
             st.session_state.output_filename = f"{base_name}.md"
-            md = get_converter(provider, api_key)
+            md_basic = get_basic_converter()
 
             with st.spinner("Converting to Markdown..."):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -113,16 +147,23 @@ with tab_file:
                 try:
                     # Case 1: Image files
                     if suffix in [".png", ".jpg", ".jpeg", ".webp"]:
+                        text = ""
                         if api_key and api_key.strip():
-                            result = md.convert(tmp_path)
-                            text = getattr(result, "markdown", None) or result.text_content or ""
+                            try:
+                                text = convert_image_with_vision(tmp_path, provider, api_key, selected_model)
+                            except Exception as vision_err:
+                                st.session_state.warning_msg = (
+                                    f"⚠️ AI Vision returned an error ({vision_err}), so offline OCR was used automatically instead."
+                                )
+                                with Image.open(tmp_path) as img:
+                                    text = ocr_image(img)
                         else:
                             with Image.open(tmp_path) as img:
                                 text = ocr_image(img)
 
                     # Case 2: Documents & Archives
                     else:
-                        result = md.convert(tmp_path)
+                        result = md_basic.convert(tmp_path)
                         text = getattr(result, "markdown", None) or result.text_content or ""
 
                         # Fallback to OCR if PDF is scanned images (like CamScanner)
@@ -131,7 +172,7 @@ with tab_file:
 
                     if text.strip():
                         st.session_state.markdown_output = text
-                    else:
+                    elif not st.session_state.warning_msg:
                         st.session_state.warning_msg = "⚠️ No readable text was detected in this file or image."
                 except Exception as e:
                     st.error(f"Conversion failed: {e}")
@@ -145,11 +186,11 @@ with tab_url:
         st.session_state.warning_msg = None
         st.session_state.markdown_output = None
         st.session_state.output_filename = "webpage.md"
-        md = get_converter(provider, api_key)
+        md_basic = get_basic_converter()
 
         with st.spinner("Fetching and converting URL..."):
             try:
-                result = md.convert(url_input.strip())
+                result = md_basic.convert(url_input.strip())
                 text = getattr(result, "markdown", None) or result.text_content or ""
                 if text.strip():
                     st.session_state.markdown_output = text
