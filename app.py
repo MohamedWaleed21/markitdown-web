@@ -135,4 +135,244 @@ def convert_image_with_gemini(image_path: str, key: str, model_name: str) -> str
     parts = candidates[0].get("content", {}).get("parts", [])
     return "".join(p.get("text", "") for p in parts).strip()
 
-def convert_image_with_openai(image_path: str, key: str, model
+def convert_image_with_openai(image_path: str, key: str, model_name: str) -> str:
+    client = OpenAI(api_key=key.strip(), timeout=30.0, max_retries=1)
+    md_vision = MarkItDown(llm_client=client, llm_model=model_name.strip())
+    result = md_vision.convert(image_path)
+    return getattr(result, "markdown", None) or result.text_content or ""
+
+@st.cache_resource
+def get_basic_converter():
+    return MarkItDown()
+
+def ocr_image(image: Image.Image) -> str:
+    return pytesseract.image_to_string(image, lang="ara+eng").strip()
+
+def ocr_scanned_pdf(pdf_path: str) -> str:
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    extracted_pages = []
+    progress_bar = st.progress(0, text="Running OCR on scanned PDF pages...")
+
+    try:
+        for i, page in enumerate(doc):
+            pix = page.get_pixmap(dpi=200)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            page_text = ocr_image(img)
+            if page_text:
+                extracted_pages.append(f"## Page {i + 1}\n\n{page_text}")
+            progress_bar.progress((i + 1) / total_pages, text=f"Reading page {i + 1} of {total_pages}...")
+    finally:
+        doc.close()
+        progress_bar.empty()
+
+    return "\n\n---\n\n".join(extracted_pages)
+
+def extract_youtube_id(url: str):
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    if "youtu.be" in host:
+        return parsed.path.lstrip("/").split("/")[0]
+    if "youtube.com" in host:
+        if parsed.path == "/watch":
+            return parse_qs(parsed.query).get("v", [None])[0]
+        for prefix in ("/shorts/", "/embed/", "/live/"):
+            if parsed.path.startswith(prefix):
+                return parsed.path[len(prefix):].split("/")[0]
+    return None
+
+def convert_youtube_url(url: str, md_converter: MarkItDown) -> str:
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        result = md_converter.convert(url)
+        return getattr(result, "markdown", None) or result.text_content or ""
+
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+    base_text = ""
+    try:
+        result = md_converter.convert(clean_url)
+        base_text = getattr(result, "markdown", None) or result.text_content or ""
+        if base_text.strip() and "Transcript" in base_text:
+            return base_text
+    except Exception:
+        pass
+
+    from youtube_transcript_api import YouTubeTranscriptApi
+    api = YouTubeTranscriptApi()
+    transcript_list = api.list(video_id) if hasattr(api, "list") else YouTubeTranscriptApi.list_transcripts(video_id)
+
+    transcript = None
+    try:
+        transcript = transcript_list.find_transcript(["ar", "en", "ar-EG", "en-US", "en-GB"])
+    except Exception:
+        for t in transcript_list:
+            transcript = t
+            break
+
+    if transcript is None:
+        return base_text
+
+    fetched = transcript.fetch()
+    lines = []
+    for entry in fetched:
+        snippet = entry.text if hasattr(entry, "text") else entry.get("text", "")
+        if snippet.strip():
+            lines.append(snippet.strip())
+
+    transcript_text = " ".join(lines)
+    if base_text.strip():
+        return f"{base_text.strip()}\n\n### Transcript\n\n{transcript_text}"
+    return f"# YouTube Video ({video_id})\n\n### Transcript\n\n{transcript_text}"
+
+# Collapsible sidebar for AI Vision integration
+with st.sidebar:
+    st.header("⚙️ AI Vision Options")
+    provider = st.selectbox(
+        "AI Provider (Optional)",
+        ["Google Gemini (Free Tier)", "OpenAI"]
+    )
+    api_key = st.text_input(
+        f"{provider.split(' ')[0]} API Key",
+        type="password",
+        help="Paste your API key to use AI Vision for diagrams, equations, and complex images. Leave empty for free offline OCR."
+    )
+
+    selected_model = None
+    if "Gemini" in provider:
+        if api_key and api_key.strip():
+            available_models, fetch_err = fetch_gemini_models(api_key)
+            if fetch_err:
+                st.error(f"Key check failed: {fetch_err}")
+            elif available_models:
+                st.success(f"✅ Connected! {len(available_models)} models available.")
+                selected_model = st.selectbox("Available Gemini Models", available_models)
+            else:
+                st.warning("Connected, but no text/vision models were listed.")
+        else:
+            st.caption("Paste your free Google AI Studio key above to enable AI diagram & image understanding.")
+    else:
+        selected_model = st.selectbox("OpenAI Model", ["gpt-4o-mini", "gpt-4o"])
+
+    st.info("🔒 Privacy First: Your API key and files stay in temporary session memory and are deleted immediately after conversion.")
+
+if "markdown_output" not in st.session_state:
+    st.session_state.markdown_output = None
+if "output_filename" not in st.session_state:
+    st.session_state.output_filename = "converted.md"
+if "warning_msg" not in st.session_state:
+    st.session_state.warning_msg = None
+
+tab_file, tab_url = st.tabs(["📁 Upload File or Image", "🌐 Convert URL"])
+
+with tab_file:
+    uploaded_file = st.file_uploader(
+        "Choose a document or image",
+        type=["pdf", "docx", "xlsx", "xls", "pptx", "png", "jpg", "jpeg", "webp", "html", "htm", "csv", "json", "xml", "zip", "txt", "msg"]
+    )
+    if uploaded_file is not None:
+        if st.button("Convert File", type="primary", use_container_width=True):
+            st.session_state.warning_msg = None
+            st.session_state.markdown_output = None
+            suffix = os.path.splitext(uploaded_file.name)[1].lower()
+            base_name = os.path.splitext(uploaded_file.name)[0]
+            st.session_state.output_filename = f"{base_name}.md"
+            md_basic = get_basic_converter()
+
+            with st.spinner("Converting to Markdown..."):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(uploaded_file.getvalue())
+                    tmp_path = tmp.name
+
+                try:
+                    # Case 1: Image files
+                    if suffix in [".png", ".jpg", ".jpeg", ".webp"]:
+                        text = ""
+                        if api_key and api_key.strip() and selected_model:
+                            try:
+                                if "Gemini" in provider:
+                                    text = convert_image_with_gemini(tmp_path, api_key, selected_model)
+                                else:
+                                    text = convert_image_with_openai(tmp_path, api_key, selected_model)
+                            except Exception as vision_err:
+                                st.session_state.warning_msg = (
+                                    f"⚠️ AI Vision error ({vision_err}). Switched to free offline OCR automatically."
+                                )
+                                with Image.open(tmp_path) as img:
+                                    text = ocr_image(img)
+                        else:
+                            with Image.open(tmp_path) as img:
+                                text = ocr_image(img)
+
+                    # Case 2: Documents & Archives
+                    else:
+                        result = md_basic.convert(tmp_path)
+                        text = getattr(result, "markdown", None) or result.text_content or ""
+
+                        # Fallback to OCR if PDF is scanned images (like CamScanner)
+                        if not text.strip() and suffix == ".pdf":
+                            text = ocr_scanned_pdf(tmp_path)
+
+                    if text.strip():
+                        st.session_state.markdown_output = text
+                    elif not st.session_state.warning_msg:
+                        st.session_state.warning_msg = "⚠️ No readable text was detected in this file or image."
+                except Exception as e:
+                    st.error(f"Conversion failed: {e}")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+
+with tab_url:
+    url_input = st.text_input("Enter a webpage or YouTube URL", placeholder="https://example.com/article")
+    if st.button("Convert URL", type="primary", use_container_width=True) and url_input.strip():
+        st.session_state.warning_msg = None
+        st.session_state.markdown_output = None
+        st.session_state.output_filename = "webpage.md"
+        md_basic = get_basic_converter()
+        clean_input = url_input.strip()
+
+        with st.spinner("Fetching and converting URL..."):
+            try:
+                if extract_youtube_id(clean_input):
+                    st.session_state.output_filename = "youtube_transcript.md"
+                    text = convert_youtube_url(clean_input, md_basic)
+                else:
+                    result = md_basic.convert(clean_input)
+                    text = getattr(result, "markdown", None) or result.text_content or ""
+
+                if text.strip():
+                    st.session_state.markdown_output = text
+                else:
+                    st.session_state.warning_msg = "⚠️ No readable text or subtitles (CC) were found for this URL."
+            except Exception as e:
+                err_str = str(e)
+                if any(k in err_str.lower() for k in ["blocked", "bot", "429", "ipblocked", "requestblocked"]):
+                    st.error("⚠️ YouTube blocked the cloud server IP from fetching this video's transcript. Try running the app locally or test another video.")
+                else:
+                    st.error(f"URL conversion failed: {e}")
+
+if st.session_state.warning_msg:
+    st.warning(st.session_state.warning_msg)
+
+if st.session_state.markdown_output:
+    st.divider()
+    markdown_output = st.session_state.markdown_output
+    char_count = len(markdown_output)
+    est_tokens = max(1, char_count // 4)
+
+    col1, col2 = st.columns(2)
+    col1.metric("Characters", f"{char_count:,}")
+    col2.metric("Estimated AI Tokens", f"~{est_tokens:,}")
+
+    st.download_button(
+        label="⬇️ Download .md File",
+        data=markdown_output,
+        file_name=st.session_state.output_filename,
+        mime="text/markdown",
+        use_container_width=True
+    )
+
+    st.text_area("Markdown Preview", markdown_output, height=350)
+
+st.divider()
+st.caption("🤖 Built with AI • Powered by Microsoft MarkItDown & Streamlit | Zero-storage stateless processing.")
