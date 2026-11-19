@@ -1,2 +1,6 @@
 markitdown[all]
 streamlit
+pytesseract
+pymupdf
+Pillow
+openai
