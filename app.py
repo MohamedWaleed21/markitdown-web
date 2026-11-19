@@ -8,7 +8,12 @@ from PIL import Image
 from markitdown import MarkItDown
 from openai import OpenAI
 
-st.set_page_config(page_title="MarkItDown Converter", page_icon="📄", layout="centered")
+st.set_page_config(
+    page_title="MarkItDown Converter",
+    page_icon="📄",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
 
 st.title("📄 File, Image & URL to Markdown")
 st.caption("Convert PDF, Word, Excel, PowerPoint, Images, Scanned PDFs, and URLs into clean, AI-ready Markdown.")
@@ -17,30 +22,41 @@ with st.expander("💡 Why convert files to Markdown (.md) for AI?"):
     st.markdown(
         """
         * **Saves 30%–60% of AI Tokens:** Raw HTML, XML, and Office files contain heavy formatting tags that waste your token limit. Markdown strips out the clutter and keeps pure content.
-        * **Preserves Structure & Tables:** Unlike plain copy-paste (which flattens tables and breaks headings), `.md` keeps titles (`#`), lists, and table columns intact so ChatGPT, Gemini, and Claude read your data accurately.
+        * **Preserves Structure & Tables:** Unlike plain copy-paste (which flattens tables and breaks headings), `.md` keeps titles (`#`), lists, and table columns intact so Gemini, ChatGPT, and Claude read your data accurately.
         * **Reduces AI Hallucinations:** Structured text helps LLMs distinguish between section headers, table rows, and body paragraphs, leading to more reliable answers and summaries.
         * **Universal AI Format:** Every modern AI assistant, coding agent, and RAG pipeline reads `.md` files natively as a lightweight plain-text format.
         """
     )
 
-# Optional AI Vision key in sidebar
+# Collapsible sidebar for AI Vision integration (Gemini or OpenAI)
 with st.sidebar:
-    st.header("⚙️ Advanced Options")
-    api_key = st.text_input(
-        "OpenAI API Key (Optional)",
-        type="password",
-        help="Add your own key only if you want GPT-4o-mini Vision to describe diagrams and complex images. Free OCR works without a key."
+    st.header("⚙️ AI Vision Options")
+    provider = st.selectbox(
+        "AI Provider (Optional)",
+        ["Google Gemini (Free Tier)", "OpenAI"]
     )
-    st.info("🔒 Files are processed temporarily in memory and deleted immediately after conversion.")
+    api_key = st.text_input(
+        f"{provider.split(' ')[0]} API Key",
+        type="password",
+        help="Paste your key to use AI Vision for describing diagrams, equations, and complex images. Leave empty to use free offline OCR."
+    )
+    st.info("🔒 Your API key and files stay in temporary session memory and are never stored.")
 
 @st.cache_resource
 def get_basic_converter():
     return MarkItDown()
 
-def get_converter(key: str):
+def get_converter(selected_provider: str, key: str):
     if key and key.strip():
-        client = OpenAI(api_key=key.strip())
-        return MarkItDown(llm_client=client, llm_model="gpt-4o-mini")
+        if "Gemini" in selected_provider:
+            client = OpenAI(
+                api_key=key.strip(),
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+            )
+            return MarkItDown(llm_client=client, llm_model="gemini-2.5-flash")
+        else:
+            client = OpenAI(api_key=key.strip())
+            return MarkItDown(llm_client=client, llm_model="gpt-4o-mini")
     return get_basic_converter()
 
 def ocr_image(image: Image.Image) -> str:
@@ -87,7 +103,7 @@ with tab_file:
             suffix = os.path.splitext(uploaded_file.name)[1].lower()
             base_name = os.path.splitext(uploaded_file.name)[0]
             st.session_state.output_filename = f"{base_name}.md"
-            md = get_converter(api_key)
+            md = get_converter(provider, api_key)
 
             with st.spinner("Converting to Markdown..."):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -129,7 +145,7 @@ with tab_url:
         st.session_state.warning_msg = None
         st.session_state.markdown_output = None
         st.session_state.output_filename = "webpage.md"
-        md = get_converter(api_key)
+        md = get_converter(provider, api_key)
 
         with st.spinner("Fetching and converting URL..."):
             try:
