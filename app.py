@@ -11,14 +11,14 @@ from markitdown import MarkItDown
 from openai import OpenAI
 
 st.set_page_config(
-    page_title="MarkItDown Converter",
+    page_title="MarkItDown AI Converter",
     page_icon="📄",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
 st.title("📄 File, Image & URL to Markdown")
-st.caption("Convert PDF, Word, Excel, PowerPoint, Images, Scanned PDFs, and URLs into clean, AI-ready Markdown.")
+st.caption("🤖 Built with AI • Powered by Microsoft MarkItDown & Streamlit — Convert documents, images, and URLs into clean, LLM-ready Markdown.")
 
 with st.expander("💡 Why convert files to Markdown (.md) for AI?"):
     st.markdown(
@@ -27,6 +27,21 @@ with st.expander("💡 Why convert files to Markdown (.md) for AI?"):
         * **Preserves Structure & Tables:** Unlike plain copy-paste (which flattens tables and breaks headings), `.md` keeps titles (`#`), lists, and table columns intact so Gemini, ChatGPT, and Claude read your data accurately.
         * **Reduces AI Hallucinations:** Structured text helps LLMs distinguish between section headers, table rows, and body paragraphs, leading to more reliable answers and summaries.
         * **Universal AI Format:** Every modern AI assistant, coding agent, and RAG pipeline reads `.md` files natively as a lightweight plain-text format.
+        """
+    )
+
+with st.expander("🚀 User Guide: Images (OCR vs. AI Vision) & Maximum Value"):
+    st.markdown(
+        """
+        #### 🖼️ How Image Conversion Works
+        * **Free Offline OCR (No API Key Needed):** Automatically extracts printed Arabic & English text from screenshots and scanned PDFs. *Note: Standard OCR only reads isolated text labels—it cannot interpret circuit schematics, wiring, or scientific plots.*
+        * **AI Vision Mode (Open Sidebar `>` to add a Free Gemini Key):** Uses multimodal AI to actually "see" and describe diagrams, circuit schematics, charts, complex tables, and handwriting in structured Markdown. *(Tip: Choose a `flash` model for fast responses and higher free limits).*
+        * **Direct Chat Shortcut:** If you are already inside an AI chat (like Gemini or ChatGPT) and only need to ask about a single image, upload the image directly into that chat. Use this converter when you want reusable `.md` notes or need to process multi-page documents.
+
+        #### ⚡ How to Get Maximum Benefit
+        * **Bypass Free Chat Upload Limits:** Convert multiple PDFs, Word docs, or Excel sheets into lightweight `.md` files and combine them cleanly into a single AI prompt.
+        * **Keep Spreadsheets & Reports Accurate:** Convert `.xlsx` and `.docx` files before feeding them to an LLM so rows, columns, and formulas stay aligned.
+        * **Turn YouTube & Articles into Study Notes:** Paste any webpage or YouTube link in the **Convert URL** tab to extract clean text and transcripts ready for summarization.
         """
     )
 
@@ -48,10 +63,22 @@ def fetch_gemini_models(key: str):
             methods = m.get("supportedGenerationMethods", [])
             name = m.get("name", "").replace("models/", "")
             if "generateContent" in methods and "gemini" in name.lower():
-                if not any(skip in name.lower() for skip in ["embedding", "aqa", "tts", "robotics", "image-generation"]):
+                if not any(skip in name.lower() for skip in ["embedding", "aqa", "tts", "robotics", "image-generation", "2.5"]):
                     models.append(name)
 
-        models.sort(key=lambda x: (0 if "flash" in x else 1, x))
+        def model_priority(name: str):
+            n = name.lower()
+            if "3.8-flash" in n:
+                return (0, n)
+            if "3.6-flash" in n:
+                return (1, n)
+            if "flash" in n and "lite" not in n:
+                return (2, n)
+            if "flash" in n:
+                return (3, n)
+            return (4, n)
+
+        models.sort(key=model_priority)
         return models, None
     except Exception as e:
         return [], str(e)
@@ -78,7 +105,7 @@ def convert_image_with_gemini(image_path: str, key: str, model_name: str) -> str
                         "text": (
                             "Extract all text, tables, equations, and diagrams from this image and format the output as clean, structured Markdown. "
                             "Preserve the original language (Arabic or English), headings, lists, and tables accurately. "
-                            "If the image contains a diagram, plot, or circuit schematic, describe its structure and labels clearly in Markdown."
+                            "If the image contains a diagram, plot, or circuit schematic, describe its components, connections, and labels clearly in Markdown."
                         )
                     },
                     {
@@ -165,11 +192,11 @@ with st.sidebar:
             else:
                 st.warning("Connected, but no text/vision models were listed.")
         else:
-            st.caption("Paste your AIza... key above to load your available Gemini models automatically.")
+            st.caption("Paste your free Google AI Studio key above to enable AI diagram & image understanding.")
     else:
         selected_model = st.selectbox("OpenAI Model", ["gpt-4o-mini", "gpt-4o"])
 
-    st.info("🔒 Your API key and files stay in temporary session memory and are never stored.")
+    st.info("🔒 Privacy First: Your API key and files stay in temporary session memory and are deleted immediately after conversion.")
 
 if "markdown_output" not in st.session_state:
     st.session_state.markdown_output = None
@@ -188,94 +215,4 @@ with tab_file:
     if uploaded_file is not None:
         if st.button("Convert File", type="primary", use_container_width=True):
             st.session_state.warning_msg = None
-            st.session_state.markdown_output = None
-            suffix = os.path.splitext(uploaded_file.name)[1].lower()
-            base_name = os.path.splitext(uploaded_file.name)[0]
-            st.session_state.output_filename = f"{base_name}.md"
-            md_basic = get_basic_converter()
-
-            with st.spinner("Converting to Markdown..."):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
-
-                try:
-                    # Case 1: Image files
-                    if suffix in [".png", ".jpg", ".jpeg", ".webp"]:
-                        text = ""
-                        if api_key and api_key.strip() and selected_model:
-                            try:
-                                if "Gemini" in provider:
-                                    text = convert_image_with_gemini(tmp_path, api_key, selected_model)
-                                else:
-                                    text = convert_image_with_openai(tmp_path, api_key, selected_model)
-                            except Exception as vision_err:
-                                st.session_state.warning_msg = (
-                                    f"⚠️ AI Vision error ({vision_err}). Switched to free offline OCR automatically."
-                                )
-                                with Image.open(tmp_path) as img:
-                                    text = ocr_image(img)
-                        else:
-                            with Image.open(tmp_path) as img:
-                                text = ocr_image(img)
-
-                    # Case 2: Documents & Archives
-                    else:
-                        result = md_basic.convert(tmp_path)
-                        text = getattr(result, "markdown", None) or result.text_content or ""
-
-                        # Fallback to OCR if PDF is scanned images (like CamScanner)
-                        if not text.strip() and suffix == ".pdf":
-                            text = ocr_scanned_pdf(tmp_path)
-
-                    if text.strip():
-                        st.session_state.markdown_output = text
-                    elif not st.session_state.warning_msg:
-                        st.session_state.warning_msg = "⚠️ No readable text was detected in this file or image."
-                except Exception as e:
-                    st.error(f"Conversion failed: {e}")
-                finally:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-
-with tab_url:
-    url_input = st.text_input("Enter a webpage or YouTube URL", placeholder="https://example.com/article")
-    if st.button("Convert URL", type="primary", use_container_width=True) and url_input.strip():
-        st.session_state.warning_msg = None
-        st.session_state.markdown_output = None
-        st.session_state.output_filename = "webpage.md"
-        md_basic = get_basic_converter()
-
-        with st.spinner("Fetching and converting URL..."):
-            try:
-                result = md_basic.convert(url_input.strip())
-                text = getattr(result, "markdown", None) or result.text_content or ""
-                if text.strip():
-                    st.session_state.markdown_output = text
-                else:
-                    st.session_state.warning_msg = "⚠️ No readable text content could be extracted from this URL."
-            except Exception as e:
-                st.error(f"URL conversion failed: {e}")
-
-if st.session_state.warning_msg:
-    st.warning(st.session_state.warning_msg)
-
-if st.session_state.markdown_output:
-    st.divider()
-    markdown_output = st.session_state.markdown_output
-    char_count = len(markdown_output)
-    est_tokens = max(1, char_count // 4)
-
-    col1, col2 = st.columns(2)
-    col1.metric("Characters", f"{char_count:,}")
-    col2.metric("Estimated AI Tokens", f"~{est_tokens:,}")
-
-    st.download_button(
-        label="⬇️ Download .md File",
-        data=markdown_output,
-        file_name=st.session_state.output_filename,
-        mime="text/markdown",
-        use_container_width=True
-    )
-
-    st.text_area("Markdown Preview", markdown_output, height=350)
+            st.session
