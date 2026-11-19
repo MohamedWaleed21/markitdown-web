@@ -2,6 +2,7 @@ import base64
 import io
 import os
 import tempfile
+from urllib.parse import parse_qs, urlparse
 import fitz  # PyMuPDF
 import pytesseract
 import requests
@@ -134,85 +135,4 @@ def convert_image_with_gemini(image_path: str, key: str, model_name: str) -> str
     parts = candidates[0].get("content", {}).get("parts", [])
     return "".join(p.get("text", "") for p in parts).strip()
 
-def convert_image_with_openai(image_path: str, key: str, model_name: str) -> str:
-    client = OpenAI(api_key=key.strip(), timeout=30.0, max_retries=1)
-    md_vision = MarkItDown(llm_client=client, llm_model=model_name.strip())
-    result = md_vision.convert(image_path)
-    return getattr(result, "markdown", None) or result.text_content or ""
-
-@st.cache_resource
-def get_basic_converter():
-    return MarkItDown()
-
-def ocr_image(image: Image.Image) -> str:
-    return pytesseract.image_to_string(image, lang="ara+eng").strip()
-
-def ocr_scanned_pdf(pdf_path: str) -> str:
-    doc = fitz.open(pdf_path)
-    total_pages = len(doc)
-    extracted_pages = []
-    progress_bar = st.progress(0, text="Running OCR on scanned PDF pages...")
-
-    try:
-        for i, page in enumerate(doc):
-            pix = page.get_pixmap(dpi=200)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            page_text = ocr_image(img)
-            if page_text:
-                extracted_pages.append(f"## Page {i + 1}\n\n{page_text}")
-            progress_bar.progress((i + 1) / total_pages, text=f"Reading page {i + 1} of {total_pages}...")
-    finally:
-        doc.close()
-        progress_bar.empty()
-
-    return "\n\n---\n\n".join(extracted_pages)
-
-# Collapsible sidebar for AI Vision integration
-with st.sidebar:
-    st.header("⚙️ AI Vision Options")
-    provider = st.selectbox(
-        "AI Provider (Optional)",
-        ["Google Gemini (Free Tier)", "OpenAI"]
-    )
-    api_key = st.text_input(
-        f"{provider.split(' ')[0]} API Key",
-        type="password",
-        help="Paste your API key to use AI Vision for diagrams, equations, and complex images. Leave empty for free offline OCR."
-    )
-
-    selected_model = None
-    if "Gemini" in provider:
-        if api_key and api_key.strip():
-            available_models, fetch_err = fetch_gemini_models(api_key)
-            if fetch_err:
-                st.error(f"Key check failed: {fetch_err}")
-            elif available_models:
-                st.success(f"✅ Connected! {len(available_models)} models available.")
-                selected_model = st.selectbox("Available Gemini Models", available_models)
-            else:
-                st.warning("Connected, but no text/vision models were listed.")
-        else:
-            st.caption("Paste your free Google AI Studio key above to enable AI diagram & image understanding.")
-    else:
-        selected_model = st.selectbox("OpenAI Model", ["gpt-4o-mini", "gpt-4o"])
-
-    st.info("🔒 Privacy First: Your API key and files stay in temporary session memory and are deleted immediately after conversion.")
-
-if "markdown_output" not in st.session_state:
-    st.session_state.markdown_output = None
-if "output_filename" not in st.session_state:
-    st.session_state.output_filename = "converted.md"
-if "warning_msg" not in st.session_state:
-    st.session_state.warning_msg = None
-
-tab_file, tab_url = st.tabs(["📁 Upload File or Image", "🌐 Convert URL"])
-
-with tab_file:
-    uploaded_file = st.file_uploader(
-        "Choose a document or image",
-        type=["pdf", "docx", "xlsx", "xls", "pptx", "png", "jpg", "jpeg", "webp", "html", "htm", "csv", "json", "xml", "zip", "txt", "msg"]
-    )
-    if uploaded_file is not None:
-        if st.button("Convert File", type="primary", use_container_width=True):
-            st.session_state.warning_msg = None
-            st.session
+def convert_image_with_openai(image_path: str, key: str, model
